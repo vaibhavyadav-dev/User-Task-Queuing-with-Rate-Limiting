@@ -1,0 +1,27 @@
+version: '3'
+services:
+  node-app:
+    build: .
+    container_name: Node_Server
+    ports:
+      - '3000:3000'
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      - redis
+    volumes:
+      - .:/app
+    restart: unless-stopped
+
+  redis:
+    image: redis:alpine
+    container_name: redis_server
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+volumes:
+  redis_data:

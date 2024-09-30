@@ -1,99 +1,121 @@
 const express = require('express');
 const bodyParser = require('body-parser');
+const redis = require('redis');
 const fs = require('fs');
 const app = express();
 
 app.use(bodyParser.json());
 
-// In-memory storage for user rate limiting and task queueing
-// { userId: { perSecond: [], perMinute: [], queue: [] } }
-
-// perSecond - will store how many request per second
-// perMinute -  will store how many request per minute
-// queue -  will hold the request inorder to process them later
-const userTasks = new Map();  
-
-
-async function task(user_id){
-    const timestamp = new Date().toISOString();
-    const logs = `${user_id}-task completed at-${Date.now()}`
-    fs.appendFileSync('task_logs.txt', log);
-    console.log(logs)
-}
-
-// Middleware for rate limiting and queuing tasks
-const rateLimiter = (req, res, next) => {
-    const userId = req.body.user_id;
-    const currentTime = Date.now();
-
-    if (!userTasks.has(userId)) {
-        userTasks.set(userId, { perSecond: [], perMinute: [], queue: [] });
-    }
-    const userData = userTasks.get(userId);
-
-    // Filter out timestamps older than 1 second and 1 minute
-    userData.perSecond = userData.perSecond.filter(ts => currentTime - ts < 1000);
-    userData.perMinute = userData.perMinute.filter(ts => currentTime - ts < 60000);
-
-    // Check if the user has exceeded the rate limits
-    if (userData.perSecond.length >= 1 || userData.perMinute.length >= 20) {
-        // Queue the task and hold the response until processed
-        userData.queue.push({ req, res });
-        return;  // Don't call next(), task is queued for later processing
-    }
-
-    // Update rate limit trackers
-    userData.perSecond.push(currentTime);
-    userData.perMinute.push(currentTime);
-    next();
-};
-
-// Process the queue for each user, respecting rate limits
-const processQueue = () => {
-    const currentTime = Date.now();
-    userTasks.forEach((user_data, user_id) => {
-        // Check if there are any tasks in the queue
-        if (user_data.queue.length > 0) {
-            // Respect the rate limits before processing the next task
-            user_data.perSecond = user_data.perSecond.filter(ts => currentTime - ts < 1000);
-            user_data.perMinute = user_data.perMinute.filter(ts => currentTime - ts < 60000);
-
-            if (user_data.perSecond.length < 1 && user_data.perMinute.length < 20) {
-                // If rate limits allow, process the next task in the queue
-                const { req, res } = user_data.queue.shift();
-
-                // Process the task
-                user_data.perSecond.push(currentTime);
-                user_data.perMinute.push(currentTime);
-
-                task(req.body.userId);
-                res.status(200).json({ message: 'Task processed successfully (Took Sometime because rate limit were exceeded).' });
-            }
-        }
-    });
-};
-
-// Set an interval to check and process the queue every second
-setInterval(processQueue, 1000);
-
-// Route to process tasks + middleware + callbackfunction
-app.post('/process-task', rateLimiter, (req, res) => {
-    const timestamp = new Date().toISOString();
-    const { userId } = req.body;
-
-    if (!userTasks.has(userId)) {
-        userTasks.set(userId, { perSecond: [], perMinute: [], queue: [] });
-    }
-    // If there are no tasks in the queue, process immediately
-    const userData = userTasks.get(userId);
-    if (userData.queue.length === 0) {
-        task(userId);
-        res.status(200).send({ message: 'Task processed Instantly (At the time request arrived) - ' + timestamp });
-    } else {
-        // If there are tasks in the queue, they will be processed by the interval handler
-        userData.queue.push({ req, res });
+// Create a Redis client with built-in Promise support
+const redisClient = redis.createClient({
+    socket: {
+        host: process.env.REDIS_HOST || 'localhost',
+        port: process.env.REDIS_PORT || 6379,
     }
 });
 
+// Connect the Redis client once during startup
+if (!redisClient.isOpen) {
+    redisClient.connect().catch(err => {
+        console.error('Error connecting to Redis:', err);
+    });
+}
+
+// Error handling for Redis
+redisClient.on('error', (err) => {
+    console.error('Redis error:', err);
+});
+
+// Task processing function (logs task completion with userId and timestamp)
+const processTask = (userId) => {
+    const timestamp = new Date().toISOString();
+    const log = `User: ${userId}, Task completed at: ${timestamp}\n`;
+    fs.appendFileSync('task_logs.txt', log);
+    console.log(log);
+};
+
+// Middleware to handle rate limiting and queuing
+const rateLimiter = async (req, res, next) => {
+    const userId = req.body.userId;
+
+    try {
+        // Get task counts for the user in the current second and minute
+        const tasksInSecond = await redisClient.get(`user:${userId}:second`);
+        const tasksInMinute = await redisClient.get(`user:${userId}:minute`);
+
+        const tasksThisSecond = tasksInSecond ? parseInt(tasksInSecond, 10) : 0;
+        const tasksThisMinute = tasksInMinute ? parseInt(tasksInMinute, 10) : 0;
+
+        if (tasksThisSecond >= 1 || tasksThisMinute >= 20) {
+            // Rate limit exceeded - queue the task in Redis
+            await redisClient.rPush(`user:${userId}:queue`, JSON.stringify(req.body));
+            console.log(`Task for user ${userId} queued.`);
+            return res.status(202).send('Rate limit exceeded. Task added to the queue.');
+        }
+
+        // Update the user's task counts in Redis
+        await redisClient.multi()
+            .incr(`user:${userId}:second`)
+            .expire(`user:${userId}:second`, 1) // TTL of 1 second
+            .incr(`user:${userId}:minute`)
+            .expire(`user:${userId}:minute`, 60) // TTL of 60 seconds
+            .exec();
+
+        next();  // Proceed to process the task if rate limit is not exceeded
+    } catch (err) {
+        console.error('Rate limiter error:', err);
+        res.status(500).send('Internal server error');
+    }
+};
+
+// Process tasks from the queue for each user, respecting the rate limit
+const processQueue = async (userId) => {
+    try {
+        // Get the next task in the queue for the user
+        const queuedTask = await redisClient.lPop(`user:${userId}:queue`);
+
+        if (queuedTask) {
+            const taskData = JSON.parse(queuedTask);
+            processTask(taskData.userId);
+
+            // Update rate limit counts in Redis
+            await redisClient.multi()
+                .incr(`user:${taskData.userId}:second`)
+                .expire(`user:${taskData.userId}:second`, 1)
+                .incr(`user:${taskData.userId}:minute`)
+                .expire(`user:${taskData.userId}:minute`, 60)
+                .exec();
+        }
+    } catch (err) {
+        console.error('Error processing queue:', err);
+    }
+};
+
+// Periodically check and process queued tasks for each user
+setInterval(async () => {
+    try {
+        // Get all keys that represent user queues
+        const userKeys = await redisClient.keys('user:*:queue');
+
+        for (const userKey of userKeys) {
+            const userId = userKey.split(':')[1];
+            await processQueue(userId);
+        }
+    } catch (err) {
+        console.error('Error processing queues:', err);
+    }
+}, 1000); // Process queues every second
+
+// Route to handle task requests
+app.post('/process-task', rateLimiter, (req, res) => {
+    const { userId } = req.body;
+
+    // Process the task immediately if within the rate limit
+    processTask(userId);
+    res.status(200).send('Task processed successfully.'); 
+});
+
 // Start the server
-app.listen(3000,  console.log('Server running on port 3000... :) '));
+app.listen(3000, () => {
+    console.log('Server running on port 3000');
+});
