@@ -1,16 +1,12 @@
 const cluster = require('cluster');
-const os = require('os');
-
+// if master node then fork two worker nodes else call the worker nodes
 if (cluster.isMaster) {
-    const numCPUs = 2;  // Two replicas
-    for (let i = 0; i < numCPUs; i++) {
+    for (let i = 0; i < 2; i++) {
+        // create replica 
         cluster.fork();
     }
 
-    cluster.on('exit', (worker, code, signal) => {
-        console.log(`Worker ${worker.process.pid} died. Starting a new one.`);
-        cluster.fork();
-    });
 } else {
-    require('./Controller/controller');  // Import your server here
+    // main file goes here this will handle the request on each 
+    require('./server');
 }
