@@ -1,0 +1,11 @@
+version: '3'
+
+services:
+  node-app:
+    build: .
+    container_name: Node_Server
+    ports:
+      - '3000:3000'
+    volumes:
+      - .:/app
+    restart: unless-stopped
