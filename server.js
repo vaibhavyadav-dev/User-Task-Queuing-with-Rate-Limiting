@@ -6,7 +6,7 @@ const app = express();
 app.use(bodyParser.json());
 
 // In-memory storage for user rate limiting and task queueing
-// { userId: { perSecond: [], perMinute: [], queue: [] } }
+// { user_id: { perSecond: [], perMinute: [], queue: [] } }
 
 // perSecond - will store how many request per second
 // perMinute -  will store how many request per minute
@@ -15,21 +15,20 @@ const userTasks = new Map();
 
 
 async function task(user_id){
-    const timestamp = new Date().toISOString();
     const logs = `${user_id}-task completed at-${Date.now()}`
-    fs.appendFileSync('task_logs.txt', log);
+    fs.appendFileSync('task_logs.txt', logs);
     console.log(logs)
 }
 
 // Middleware for rate limiting and queuing tasks
 const rateLimiter = (req, res, next) => {
-    const userId = req.body.user_id;
+    const user_id = req.body.user_id;
     const currentTime = Date.now();
 
-    if (!userTasks.has(userId)) {
-        userTasks.set(userId, { perSecond: [], perMinute: [], queue: [] });
+    if (!userTasks.has(user_id)) {
+        userTasks.set(user_id, { perSecond: [], perMinute: [], queue: [] });
     }
-    const userData = userTasks.get(userId);
+    const userData = userTasks.get(user_id);
 
     // Filter out timestamps older than 1 second and 1 minute
     userData.perSecond = userData.perSecond.filter(ts => currentTime - ts < 1000);
@@ -66,7 +65,7 @@ const processQueue = () => {
                 user_data.perSecond.push(currentTime);
                 user_data.perMinute.push(currentTime);
 
-                task(req.body.userId);
+                task(req.body.user_id);
                 res.status(200).json({ message: 'Task processed successfully (Took Sometime because rate limit were exceeded).' });
             }
         }
@@ -79,15 +78,15 @@ setInterval(processQueue, 1000);
 // Route to process tasks + middleware + callbackfunction
 app.post('/process-task', rateLimiter, (req, res) => {
     const timestamp = new Date().toISOString();
-    const { userId } = req.body;
+    const { user_id } = req.body;
 
-    if (!userTasks.has(userId)) {
-        userTasks.set(userId, { perSecond: [], perMinute: [], queue: [] });
+    if (!userTasks.has(user_id)) {
+        userTasks.set(user_id, { perSecond: [], perMinute: [], queue: [] });
     }
     // If there are no tasks in the queue, process immediately
-    const userData = userTasks.get(userId);
+    const userData = userTasks.get(user_id);
     if (userData.queue.length === 0) {
-        task(userId);
+        task(user_id);
         res.status(200).send({ message: 'Task processed Instantly (At the time request arrived) - ' + timestamp });
     } else {
         // If there are tasks in the queue, they will be processed by the interval handler
