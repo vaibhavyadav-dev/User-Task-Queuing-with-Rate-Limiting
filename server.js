@@ -87,7 +87,7 @@ app.post('/process-task', rateLimiter, (req, res) => {
     const userData = userTasks.get(user_id);
     if (userData.queue.length === 0) {
         task(user_id);
-        res.status(200).send({ message: 'Task processed Instantly (At the time request arrived) - ' + timestamp + ' from CI/CD Server' });
+        res.status(200).send({ message: 'Task processed Instantly (At the time request arrived) - ' + timestamp + ' - from CI/CD Server' });
     } else {
         // If there are tasks in the queue, they will be processed by the interval handler
         userData.queue.push({ req, res });
